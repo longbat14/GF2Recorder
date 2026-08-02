@@ -41,4 +41,4 @@
 dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
 ```
 
-每次向 `main` 分支提交代码，GitHub Actions 都会在 Windows 环境自动还原依赖、编译并发布自包含单文件程序；成品会同时保存为 Actions 构建产物，并发布到 Releases，文件名为 `GF2Recorder-v版本号.exe`，同时附带 SHA-256 校验文件。也可以在 Actions 页面手动运行该流程。
+每次向 `main` 分支提交代码，GitHub Actions 都会在 Windows 环境自动还原依赖、编译并发布自包含单文件程序；成品直接发布到 Releases，不占用 Actions Artifact 配额，文件名为 `GF2Recorder-v版本号.exe`，同时附带 SHA-256 校验文件。也可以在 Actions 页面手动运行该流程。
