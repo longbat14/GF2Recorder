@@ -71,7 +71,7 @@ public sealed class MainForm : Form
     readonly NumericUpDown gap = new() { Minimum = 0, Maximum = 3600, Value = 3, Width = 90 };
     readonly Button recordButton = new() { Text = "开始录制", AutoSize = true };
     readonly Button stopButton = new() { Text = "停止录制", AutoSize = true, Enabled = false };
-    readonly Button playButton = new() { Text = "启动后台任务", AutoSize = true };
+    readonly Button playButton = new() { Text = "启动前台任务", AutoSize = true };
     readonly Button stopPlayButton = new() { Text = "停止任务", AutoSize = true, Enabled = false };
     readonly Button testButton = new() { Text = "测试PC连接", AutoSize = true };
     readonly CheckBox debugMode = new() { Text = "调试模式（每步暂停）", AutoSize = true, Padding = new Padding(10, 7, 0, 0) };
@@ -97,7 +97,7 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "少前2后台任务助手";
+        Text = "少前2任务助手（前台模式）";
         Width = 1120; Height = 760; MinimumSize = new(900, 620);
         Font = new Font("Microsoft YaHei UI", 10F);
         try { Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
@@ -410,14 +410,20 @@ public sealed class MainForm : Form
     {
         if (debugStep == null || !EnsureGameWindow(true)) return;
         debugRetry.Enabled = false;
+        GameClient.ForegroundSession? foregroundSession = null;
         try
         {
+            foregroundSession = await GameClient.BeginForegroundSessionAsync(gameWindow, CancellationToken.None);
             await ExecuteBasicStepAsync(debugStep, CancellationToken.None);
             await Task.Delay(300);
             SetPreview(await GameClient.CaptureAsync(gameWindow, CancellationToken.None), debugStep);
         }
         catch (Exception ex) { SetStatus("重试失败：" + ex.Message, true); }
-        finally { debugRetry.Enabled = true; }
+        finally
+        {
+            if (foregroundSession is { } session) GameClient.EndForegroundSession(session);
+            debugRetry.Enabled = true;
+        }
     }
 
     async Task DebugPauseAsync(ActionStep step, CancellationToken token)
@@ -460,9 +466,9 @@ public sealed class MainForm : Form
             var bitmap = await GameClient.CaptureAsync(gameWindow, CancellationToken.None);
             var old = previewBitmap; previewBitmap = bitmap; preview.Image = bitmap; old?.Dispose();
             debugStep = null; previewInfo.Text = $"PC连接测试成功：{GameClient.LastCaptureMode}，截图 {bitmap.Width}×{bitmap.Height}";
-            SetStatus("已捕获PC客户端画面。请检查下方预览是否为当前游戏画面；后台点击需再用无消耗任务验证。");
+            SetStatus("已捕获PC客户端画面。请检查下方预览是否为当前游戏画面；首次前台回放请用无消耗任务验证。");
         }
-        catch (Exception ex) { SetStatus("PC连接测试失败：" + ex.Message, true); MessageBox.Show(ex.Message, "PC后台连接测试"); }
+        catch (Exception ex) { SetStatus("PC连接测试失败：" + ex.Message, true); MessageBox.Show(ex.Message, "PC连接测试"); }
         finally { GameClient.RestoreParkedWindow(gameWindow); testButton.Enabled = true; }
     }
 
@@ -701,7 +707,7 @@ public sealed class MainForm : Form
     {
         if (recorder == null) return;
         recorder.Dispose(); recorder = null; recordButton.Enabled = true; stopButton.Enabled = false; playButton.Enabled = true; testButton.Enabled = true; Save();
-        SetStatus($"录制完成，共 {Current?.Steps.Count ?? 0} 步。可以启动PC后台任务。");
+        SetStatus($"录制完成，共 {Current?.Steps.Count ?? 0} 步。可以启动PC前台任务。");
     }
 
     async Task PlayAsync()
@@ -709,13 +715,15 @@ public sealed class MainForm : Form
         if (!EnsureGameWindow(true)) return;
         if (Current is not { Steps.Count: > 0 } flow) { MessageBox.Show("当前任务没有录制步骤。"); return; }
         playbackCts = new(); TogglePlaying(true);
+        GameClient.ForegroundSession? foregroundSession = null;
         try
         {
             using (var connectionTest = await GameClient.CaptureAsync(gameWindow, playbackCts.Token)) { }
-            SetStatus($"PC后台连接测试通过（{GameClient.LastCaptureMode}）。开始运行“{flow.Name}”。");
+            foregroundSession = await GameClient.BeginForegroundSessionAsync(gameWindow, playbackCts.Token);
+            SetStatus($"PC连接测试通过（{GameClient.LastCaptureMode}）。已切换到游戏前台，运行期间请勿操作鼠标。");
             for (int n = 1; n <= (int)loops.Value; n++)
             {
-                SetStatus($"正在后台运行“{flow.Name}”：第 {n}/{loops.Value} 次");
+                SetStatus($"正在前台运行“{flow.Name}”：第 {n}/{loops.Value} 次；程序正在控制鼠标");
                 for (var i = 0; i < flow.Steps.Count; i++)
                 {
                     var s = flow.Steps[i];
@@ -724,7 +732,7 @@ public sealed class MainForm : Form
                     steps.SelectedIndex = i;
                     steps.TopIndex = Math.Max(0, i - 3);
                     steps.Invalidate();
-                    SetStatus($"正在后台运行“{flow.Name}”：第 {n}/{loops.Value} 次，步骤 {i + 1}/{flow.Steps.Count}");
+                    SetStatus($"正在前台运行“{flow.Name}”：第 {n}/{loops.Value} 次，步骤 {i + 1}/{flow.Steps.Count}");
                     await Task.Delay(s.WaitBeforeMs, playbackCts.Token);
                     if (s.Type == "SmartTap")
                     {
@@ -749,7 +757,12 @@ public sealed class MainForm : Form
         }
         catch (OperationCanceledException) { SetStatus("已停止运行。", true); }
         catch (Exception ex) { System.Media.SystemSounds.Exclamation.Play(); SetStatus("运行失败：" + ex.Message, true); }
-        finally { GameClient.RestoreParkedWindow(gameWindow); playingStepIndex = -1; steps.Invalidate(); ClearPreview(); playbackCts?.Dispose(); playbackCts = null; TogglePlaying(false); }
+        finally
+        {
+            GameClient.RestoreParkedWindow(gameWindow);
+            if (foregroundSession is { } session) GameClient.EndForegroundSession(session);
+            playingStepIndex = -1; steps.Invalidate(); ClearPreview(); playbackCts?.Dispose(); playbackCts = null; TogglePlaying(false);
+        }
     }
 
     void StopPlayback() { debugGate?.TrySetCanceled(); playbackCts?.Cancel(); }
@@ -885,11 +898,11 @@ public sealed class MouseRecorder : IDisposable
 
 static class GameClient
 {
-    const int WM_ACTIVATE = 0x0006, WM_SETFOCUS = 0x0007, WA_ACTIVE = 1;
-    const int WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_MOUSEWHEEL = 0x020A, MK_LBUTTON = 0x0001;
+    const uint MOUSEEVENTF_LEFTDOWN = 0x0002, MOUSEEVENTF_LEFTUP = 0x0004, MOUSEEVENTF_WHEEL = 0x0800;
     static Native.RECT parkedOriginal;
     static bool parked, wasMinimized;
     public static string LastCaptureMode { get; private set; } = "窗口后台截图";
+    public readonly record struct ForegroundSession(IntPtr Window, IntPtr PreviousWindow, Native.POINT PreviousCursor, bool GameWasMinimized);
 
     public static IntPtr FindWindow()
     {
@@ -905,68 +918,81 @@ static class GameClient
     public static async Task TapAsync(IntPtr window, int x, int y, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var target = Native.FindInputWindow(window);
-        var p = TargetClientPoint(window, target, x, y);
-        var lp = MakeLParam(p.X, p.Y);
-        PrepareBackgroundInput(window, target);
-        SendMouse(target, WM_MOUSEMOVE, IntPtr.Zero, lp);
-        SendMouse(target, WM_LBUTTONDOWN, (IntPtr)MK_LBUTTON, lp);
-        await Task.Delay(65, token);
-        SendMouse(target, WM_LBUTTONUP, IntPtr.Zero, lp);
+        await EnsureForegroundAsync(window, token);
+        var p = RootScreenPoint(window, x, y);
+        Native.SetCursorPos(p.X, p.Y);
+        await Task.Delay(20, token);
+        Native.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+        try { await Task.Delay(65, token); }
+        finally { Native.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero); }
         await Task.Delay(25, token);
     }
 
     public static async Task SwipeAsync(IntPtr window, int x1, int y1, int x2, int y2, int durationMs, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var target = Native.FindInputWindow(window);
-        var a = TargetClientPoint(window, target, x1, y1); var b = TargetClientPoint(window, target, x2, y2);
-        PrepareBackgroundInput(window, target);
-        SendMouse(target, WM_MOUSEMOVE, IntPtr.Zero, MakeLParam(a.X, a.Y));
-        SendMouse(target, WM_LBUTTONDOWN, (IntPtr)MK_LBUTTON, MakeLParam(a.X, a.Y));
-        await Task.Delay(40, token);
-        var frames = Math.Clamp(durationMs / 16, 4, 120);
-        for (var i = 1; i <= frames; i++)
+        await EnsureForegroundAsync(window, token);
+        var a = RootScreenPoint(window, x1, y1); var b = RootScreenPoint(window, x2, y2);
+        Native.SetCursorPos(a.X, a.Y);
+        Native.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+        try
         {
-            token.ThrowIfCancellationRequested();
-            var x = a.X + (b.X - a.X) * i / frames; var y = a.Y + (b.Y - a.Y) * i / frames;
-            SendMouse(target, WM_MOUSEMOVE, (IntPtr)MK_LBUTTON, MakeLParam(x, y));
-            await Task.Delay(Math.Max(1, durationMs / frames), token);
+            await Task.Delay(40, token);
+            var frames = Math.Clamp(durationMs / 16, 4, 120);
+            for (var i = 1; i <= frames; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                var x = a.X + (b.X - a.X) * i / frames; var y = a.Y + (b.Y - a.Y) * i / frames;
+                Native.SetCursorPos(x, y);
+                await Task.Delay(Math.Max(1, durationMs / frames), token);
+            }
         }
-        SendMouse(target, WM_LBUTTONUP, IntPtr.Zero, MakeLParam(b.X, b.Y));
+        finally { Native.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero); }
         await Task.Delay(25, token);
     }
 
     public static async Task WheelAsync(IntPtr window, int x, int y, int delta, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var target = Native.FindInputWindow(window);
-        var client = TargetClientPoint(window, target, x, y);
+        await EnsureForegroundAsync(window, token);
         var screen = RootScreenPoint(window, x, y);
-        PrepareBackgroundInput(window, target);
-        SendMouse(target, WM_MOUSEMOVE, IntPtr.Zero, MakeLParam(client.X, client.Y));
-        SendMouse(target, WM_MOUSEWHEEL, (IntPtr)(delta << 16), MakeLParam(screen.X, screen.Y));
+        Native.SetCursorPos(screen.X, screen.Y);
+        await Task.Delay(20, token);
+        Native.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, unchecked((uint)delta), UIntPtr.Zero);
         await Task.Delay(35, token);
     }
 
-    static void PrepareBackgroundInput(IntPtr root, IntPtr target)
+    public static async Task<ForegroundSession> BeginForegroundSessionAsync(IntPtr window, CancellationToken token)
     {
-        Native.PostMessage(root, WM_ACTIVATE, (IntPtr)WA_ACTIVE, IntPtr.Zero);
-        Native.PostMessage(target, WM_SETFOCUS, IntPtr.Zero, IntPtr.Zero);
+        token.ThrowIfCancellationRequested();
+        var previousWindow = Native.GetForegroundWindow();
+        Native.GetCursorPos(out var previousCursor);
+        var gameWasMinimized = parked ? wasMinimized : Native.IsIconic(window);
+        RestoreParkedWindow(window);
+        if (Native.IsIconic(window)) Native.ShowWindow(window, 9); // SW_RESTORE
+        await EnsureForegroundAsync(window, token);
+        return new ForegroundSession(window, previousWindow, previousCursor, gameWasMinimized);
     }
 
-    static void SendMouse(IntPtr target, int message, IntPtr wParam, IntPtr lParam)
+    static async Task EnsureForegroundAsync(IntPtr window, CancellationToken token)
     {
-        if (Native.SendMessageTimeout(target, message, wParam, lParam, 0x0002, 200, out _) == IntPtr.Zero)
-            Native.PostMessage(target, message, wParam, lParam);
+        for (var attempt = 0; attempt < 3 && Native.GetForegroundWindow() != window; attempt++)
+        {
+            Native.SetWindowPos(window, IntPtr.Zero, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040); // NOSIZE | NOMOVE | SHOWWINDOW
+            Native.BringWindowToTop(window);
+            Native.SetForegroundWindow(window);
+            await Task.Delay(150, token);
+        }
+        if (Native.GetForegroundWindow() != window)
+            throw new InvalidOperationException("无法将游戏切换到前台。请先点击一次游戏窗口后重试。");
     }
 
-    static Point TargetClientPoint(IntPtr root, IntPtr target, int x, int y)
+    public static void EndForegroundSession(ForegroundSession session)
     {
-        var screen = RootScreenPoint(root, x, y);
-        var p = new Native.POINT { X = screen.X, Y = screen.Y };
-        Native.ScreenToClient(target, ref p);
-        return new Point(p.X, p.Y);
+        Native.SetCursorPos(session.PreviousCursor.X, session.PreviousCursor.Y);
+        if (session.GameWasMinimized && Native.IsWindow(session.Window)) Native.ShowWindow(session.Window, 6); // SW_MINIMIZE
+        if (session.PreviousWindow != IntPtr.Zero && Native.IsWindow(session.PreviousWindow))
+            Native.SetForegroundWindow(session.PreviousWindow);
     }
 
     static Point RootScreenPoint(IntPtr root, int x, int y)
@@ -1061,7 +1087,6 @@ static class GameClient
         Native.GetClientRect(window, out var rect);
         return new Point(Math.Clamp((int)Math.Round(x * Math.Max(1, rect.Right) / 1920.0), 0, Math.Max(0, rect.Right-1)), Math.Clamp((int)Math.Round(y * Math.Max(1, rect.Bottom) / 1080.0), 0, Math.Max(0, rect.Bottom-1)));
     }
-    static IntPtr MakeLParam(int x, int y) => (IntPtr)((y << 16) | (x & 0xffff));
 }
 
 static class ImageMatcher
@@ -1331,6 +1356,12 @@ static class Native
     [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
 
     public static IntPtr FindWindowByProcess(string processName)
     {
