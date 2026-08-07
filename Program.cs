@@ -170,6 +170,7 @@ public sealed class MainForm : Form
         };
         var editWait = new ToolStripMenuItem("修改等待时间…");
         var editCoordinates = new ToolStripMenuItem("修改坐标…");
+        var editWheelAmount = new ToolStripMenuItem("修改滚轮格数…");
         var editNote = new ToolStripMenuItem("添加/修改备注…");
         var smartConfirm = new ToolStripMenuItem("设为智能确认…");
         var stateCorrection = new ToolStripMenuItem("设为双状态校正…");
@@ -177,17 +178,19 @@ public sealed class MainForm : Form
         var deleteStep = new ToolStripMenuItem("删除这步操作");
         editWait.Click += (_, _) => EditSelectedWait();
         editCoordinates.Click += (_, _) => EditSelectedCoordinates();
+        editWheelAmount.Click += (_, _) => EditSelectedWheelAmount();
         editNote.Click += (_, _) => EditSelectedNote();
         smartConfirm.Click += async (_, _) => await ConfigureSmartConfirmAsync();
         stateCorrection.Click += async (_, _) => await ConfigureStateCorrectionAsync();
         cancelSmart.Click += (_, _) => CancelSmartConfirm();
         deleteStep.Click += (_, _) => DeleteSelectedStep();
-        stepMenu.Items.AddRange([editWait, editCoordinates, editNote, smartConfirm, stateCorrection, cancelSmart, new ToolStripSeparator(), deleteStep]);
+        stepMenu.Items.AddRange([editWait, editCoordinates, editWheelAmount, editNote, smartConfirm, stateCorrection, cancelSmart, new ToolStripSeparator(), deleteStep]);
         stepMenu.Opening += (_, e) =>
         {
             if (steps.SelectedIndex < 0) { e.Cancel = true; return; }
             var type = Current?.Steps[steps.SelectedIndex].Type;
             editNote.Text = string.IsNullOrWhiteSpace(Current?.Steps[steps.SelectedIndex].Note) ? "添加备注…" : "修改备注…";
+            editWheelAmount.Visible = type == "Wheel";
             smartConfirm.Enabled = type is "Tap" or "SmartTap";
             stateCorrection.Enabled = type is "Tap" or "SmartTap" or "StateCorrection";
             cancelSmart.Visible = type is "SmartTap" or "StateCorrection";
@@ -556,6 +559,21 @@ public sealed class MainForm : Form
             "Wheel" => $"已修改步骤 {index + 1} 的滚轮位置：({step.X1}, {step.Y1})",
             _ => $"已修改步骤 {index + 1} 的点击坐标：({step.X1}, {step.Y1})"
         });
+    }
+
+    void EditSelectedWheelAmount()
+    {
+        if (Current is not { } flow || steps.SelectedIndex < 0) return;
+        var index = steps.SelectedIndex;
+        var step = flow.Steps[index];
+        if (step.Type != "Wheel") return;
+        var direction = step.WheelDelta >= 0 ? "向上" : "向下";
+        var current = Math.Max(1, Math.Abs(step.WheelDelta) / 120);
+        var value = Prompt.ShowNumber("修改滚轮格数", $"滚轮{direction}需要滚动多少格：", current, 1, 1000, "格");
+        if (value is null) return;
+        step.WheelDelta = (step.WheelDelta >= 0 ? 1 : -1) * value.Value * 120;
+        steps.Items[index] = step; steps.SelectedIndex = index; Save();
+        SetStatus($"已修改步骤 {index + 1}：滚轮{direction} {value.Value} 格。");
     }
 
     void EditSelectedNote()
@@ -1272,12 +1290,12 @@ static class Prompt
         return f.ShowDialog() == DialogResult.OK ? box.Text : null;
     }
 
-    public static int? ShowNumber(string title, string label, int value, int minimum, int maximum)
+    public static int? ShowNumber(string title, string label, int value, int minimum, int maximum, string unitText = "毫秒")
     {
         using var f = new Form { Text = title, Width = 440, Height = 175, StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false, Font = new Font("Microsoft YaHei UI", 10F) };
         var text = new Label { Left = 15, Top = 18, Width = 390, Text = label };
         var number = new NumericUpDown { Left = 15, Top = 48, Width = 180, Minimum = minimum, Maximum = maximum, Value = Math.Clamp(value, minimum, maximum), ThousandsSeparator = true };
-        var unit = new Label { Left = 205, Top = 51, Width = 80, Text = "毫秒" };
+        var unit = new Label { Left = 205, Top = 51, Width = 80, Text = unitText };
         var ok = new Button { Text = "保存", Left = 245, Top = 88, Width = 75, DialogResult = DialogResult.OK };
         var cancel = new Button { Text = "取消", Left = 330, Top = 88, Width = 75, DialogResult = DialogResult.Cancel };
         f.Controls.AddRange([text, number, unit, ok, cancel]); f.AcceptButton = ok; f.CancelButton = cancel;
