@@ -175,6 +175,7 @@ public sealed class MainForm : Form
         var smartConfirm = new ToolStripMenuItem("设为智能确认…");
         var stateCorrection = new ToolStripMenuItem("设为双状态校正…");
         var cancelSmart = new ToolStripMenuItem("取消智能确认");
+        var duplicateStep = new ToolStripMenuItem("复制这步操作");
         var deleteStep = new ToolStripMenuItem("删除这步操作");
         editWait.Click += (_, _) => EditSelectedWait();
         editCoordinates.Click += (_, _) => EditSelectedCoordinates();
@@ -183,8 +184,9 @@ public sealed class MainForm : Form
         smartConfirm.Click += async (_, _) => await ConfigureSmartConfirmAsync();
         stateCorrection.Click += async (_, _) => await ConfigureStateCorrectionAsync();
         cancelSmart.Click += (_, _) => CancelSmartConfirm();
+        duplicateStep.Click += (_, _) => DuplicateSelectedStep();
         deleteStep.Click += (_, _) => DeleteSelectedStep();
-        stepMenu.Items.AddRange([editWait, editCoordinates, editWheelAmount, editNote, smartConfirm, stateCorrection, cancelSmart, new ToolStripSeparator(), deleteStep]);
+        stepMenu.Items.AddRange([editWait, editCoordinates, editWheelAmount, editNote, smartConfirm, stateCorrection, cancelSmart, new ToolStripSeparator(), duplicateStep, deleteStep]);
         stepMenu.Opening += (_, e) =>
         {
             if (steps.SelectedIndex < 0) { e.Cancel = true; return; }
@@ -536,6 +538,33 @@ public sealed class MainForm : Form
         if (!string.IsNullOrWhiteSpace(step.AlternateTemplateFile) && File.Exists(step.AlternateTemplateFile)) try { File.Delete(step.AlternateTemplateFile); } catch { }
         f.Steps.RemoveAt(steps.SelectedIndex); RefreshSteps(); Save();
     }
+
+    void DuplicateSelectedStep()
+    {
+        if (Current is not { } flow || steps.SelectedIndex < 0) return;
+        var sourceIndex = steps.SelectedIndex;
+        var source = flow.Steps[sourceIndex];
+        var copy = JsonSerializer.Deserialize<ActionStep>(JsonSerializer.Serialize(source))!;
+        copy.TemplateFile = DuplicateTemplateFile(source.TemplateFile);
+        copy.AlternateTemplateFile = DuplicateTemplateFile(source.AlternateTemplateFile);
+        var copyIndex = sourceIndex + 1;
+        flow.Steps.Insert(copyIndex, copy);
+        RefreshSteps(); steps.SelectedIndex = copyIndex; Save();
+        SetStatus($"已复制步骤 {sourceIndex + 1}，副本已插入为步骤 {copyIndex + 1}。");
+    }
+
+    static string? DuplicateTemplateFile(string? sourceFile)
+    {
+        if (string.IsNullOrWhiteSpace(sourceFile) || !File.Exists(sourceFile)) return sourceFile;
+        try
+        {
+            var target = Path.Combine(Path.GetDirectoryName(sourceFile)!, Guid.NewGuid().ToString("N") + Path.GetExtension(sourceFile));
+            File.Copy(sourceFile, target);
+            return target;
+        }
+        catch { return sourceFile; }
+    }
+
     void EditSelectedWait()
     {
         if (Current is not { } f || steps.SelectedIndex < 0) return;
@@ -958,8 +987,14 @@ static class GameClient
         var screen = RootScreenPoint(window, x, y);
         Native.SetCursorPos(screen.X, screen.Y);
         await Task.Delay(20, token);
-        Native.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, unchecked((uint)delta), UIntPtr.Zero);
-        await Task.Delay(35, token);
+        var wheelSteps = Math.Max(1, (int)Math.Ceiling(Math.Abs(delta) / 120.0));
+        var oneStepDelta = delta >= 0 ? 120 : -120;
+        for (var i = 0; i < wheelSteps; i++)
+        {
+            token.ThrowIfCancellationRequested();
+            Native.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, unchecked((uint)oneStepDelta), UIntPtr.Zero);
+            await Task.Delay(25, token);
+        }
     }
 
     public static async Task<ForegroundSession> BeginForegroundSessionAsync(IntPtr window, CancellationToken token)
