@@ -11,6 +11,7 @@
     <!-- 使用纯英文发布文件名，避免部分浏览器把中文 Release 附件保存成 default.exe。 -->
     <AssemblyName>GF2Recorder</AssemblyName>
     <ApplicationIcon>LDRecorder.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
   <ItemGroup>
     <Content Include="LDRecorder.ico" />

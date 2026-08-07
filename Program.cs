@@ -22,6 +22,7 @@ public sealed class ActionStep
     public int X2 { get; set; }
     public int Y2 { get; set; }
     public int DurationMs { get; set; }
+    public int WheelDelta { get; set; }
     public int WaitBeforeMs { get; set; }
     public string? TemplateFile { get; set; }
     public int MatchX { get; set; }
@@ -46,7 +47,9 @@ public sealed class ActionStep
         "SmartTap" => $"{WaitBeforeMs} ms　点击 ({X1}, {Y1})　智能确认·{(MatchMode == "BrightUI" ? "动态白字" : "标准图像")}·" +
                       (RetryTrigger ? $"每 {RetryIntervalMs / 1000.0:0.#} 秒重试上一步" : "只等待"),
         "StateCorrection" => $"{WaitBeforeMs} ms　点击 ({X1}, {Y1})　双状态校正　{Note}",
-        _ => $"{WaitBeforeMs} ms　滑动 ({X1}, {Y1}) → ({X2}, {Y2})　普通滑动　{Note}"
+        "Swipe" => $"{WaitBeforeMs} ms　滑动 ({X1}, {Y1}) → ({X2}, {Y2})　普通滑动　{Note}",
+        "Wheel" => $"{WaitBeforeMs} ms　滚轮{(WheelDelta > 0 ? "向上" : "向下")} {Math.Max(1, Math.Abs(WheelDelta) / 120)} 格　{Note}",
+        _ => $"{WaitBeforeMs} ms　未知操作　{Note}"
     };
 }
 
@@ -313,6 +316,7 @@ public sealed class MainForm : Form
     static string StepOperation(ActionStep step) => step.Type switch
     {
         "Swipe" => $"滑动 ({step.X1},{step.Y1})→({step.X2},{step.Y2})",
+        "Wheel" => $"滚轮{(step.WheelDelta > 0 ? "向上" : "向下")} {Math.Max(1, Math.Abs(step.WheelDelta) / 120)}格",
         "SmartTap" => $"出现后点击 ({step.X1},{step.Y1})",
         "StateCorrection" => $"识别后点击 ({step.X1},{step.Y1})",
         _ => $"点击 ({step.X1},{step.Y1})"
@@ -323,6 +327,7 @@ public sealed class MainForm : Form
         "SmartTap" => $"智能确认·{(step.MatchMode == "BrightUI" ? "动态白字" : "标准图像")}·{(step.RetryTrigger ? $"{step.RetryIntervalMs / 1000.0:0.#}秒重试" : "只等待")}",
         "StateCorrection" => "双状态校正",
         "Swipe" => "普通滑动",
+        "Wheel" => "鼠标滚轮",
         _ => "普通点击"
     };
 
@@ -379,11 +384,17 @@ public sealed class MainForm : Form
     {
         var old = previewBitmap; previewBitmap = bitmap; preview.Image = bitmap; old?.Dispose();
         debugStep = step;
-        previewInfo.Text = $"步骤 {playingStepIndex + 1}　点击 ({step.X1}, {step.Y1})" +
+        var actionText = step.Type switch
+        {
+            "Swipe" => $"滑动 ({step.X1}, {step.Y1}) → ({step.X2}, {step.Y2})",
+            "Wheel" => $"滚轮{(step.WheelDelta > 0 ? "向上" : "向下")} {Math.Max(1, Math.Abs(step.WheelDelta) / 120)} 格",
+            _ => $"点击 ({step.X1}, {step.Y1})"
+        };
+        previewInfo.Text = $"步骤 {playingStepIndex + 1}　{actionText}" +
             (step.Type is "SmartTap" or "StateCorrection" && !string.IsNullOrWhiteSpace(lastRecognitionSummary)
                 ? $"　｜{lastRecognitionSummary}" : "") +
             (!string.IsNullOrWhiteSpace(step.Note) ? $"　｜备注：{step.Note}" : "");
-        debugRetry.Enabled = true; editPoint.Enabled = step.Type is "Tap" or "SmartTap" or "StateCorrection"; debugNext.Enabled = true; preview.Invalidate();
+        debugRetry.Enabled = true; editPoint.Enabled = step.Type is "Tap" or "SmartTap" or "StateCorrection" or "Wheel"; debugNext.Enabled = true; preview.Invalidate();
     }
 
     void ClearPreview()
@@ -398,8 +409,7 @@ public sealed class MainForm : Form
         debugRetry.Enabled = false;
         try
         {
-            if (debugStep.Type == "Swipe") await GameClient.SwipeAsync(gameWindow, debugStep.X1, debugStep.Y1, debugStep.X2, debugStep.Y2, debugStep.DurationMs, CancellationToken.None);
-            else await GameClient.TapAsync(gameWindow, debugStep.X1, debugStep.Y1, CancellationToken.None);
+            await ExecuteBasicStepAsync(debugStep, CancellationToken.None);
             await Task.Delay(300);
             SetPreview(await GameClient.CaptureAsync(gameWindow, CancellationToken.None), debugStep);
         }
@@ -416,6 +426,13 @@ public sealed class MainForm : Form
         await debugGate.Task;
         debugGate = null; debugNext.Enabled = false; debugRetry.Enabled = false; editPoint.Enabled = false;
     }
+
+    Task ExecuteBasicStepAsync(ActionStep step, CancellationToken token) => step.Type switch
+    {
+        "Swipe" => GameClient.SwipeAsync(gameWindow, step.X1, step.Y1, step.X2, step.Y2, step.DurationMs, token),
+        "Wheel" => GameClient.WheelAsync(gameWindow, step.X1, step.Y1, step.WheelDelta, token),
+        _ => GameClient.TapAsync(gameWindow, step.X1, step.Y1, token)
+    };
 
     void InitializeApp()
     {
@@ -533,9 +550,12 @@ public sealed class MainForm : Form
         step.X1 = dialog.X1; step.Y1 = dialog.Y1;
         if (step.Type == "Swipe") { step.X2 = dialog.X2; step.Y2 = dialog.Y2; }
         steps.Items[index] = step; steps.SelectedIndex = index; Save();
-        SetStatus(step.Type == "Swipe"
-            ? $"已修改步骤 {index + 1}：起点 ({step.X1}, {step.Y1})，终点 ({step.X2}, {step.Y2})"
-            : $"已修改步骤 {index + 1} 的点击坐标：({step.X1}, {step.Y1})");
+        SetStatus(step.Type switch
+        {
+            "Swipe" => $"已修改步骤 {index + 1}：起点 ({step.X1}, {step.Y1})，终点 ({step.X2}, {step.Y2})",
+            "Wheel" => $"已修改步骤 {index + 1} 的滚轮位置：({step.X1}, {step.Y1})",
+            _ => $"已修改步骤 {index + 1} 的点击坐标：({step.X1}, {step.Y1})"
+        });
     }
 
     void EditSelectedNote()
@@ -701,8 +721,7 @@ public sealed class MainForm : Form
                     }
                     else
                     {
-                        if (s.Type == "Tap") await GameClient.TapAsync(gameWindow, s.X1, s.Y1, playbackCts.Token);
-                        else await GameClient.SwipeAsync(gameWindow, s.X1, s.Y1, s.X2, s.Y2, s.DurationMs, playbackCts.Token);
+                        await ExecuteBasicStepAsync(s, playbackCts.Token);
                     }
                     await DebugPauseAsync(s, playbackCts.Token);
                 }
@@ -828,6 +847,18 @@ public sealed class MouseRecorder : IDisposable
                         : new ActionStep { Type = "Swipe", X1 = a.X, Y1 = a.Y, X2 = b.X, Y2 = b.Y, DurationMs = (int)Math.Clamp(now - downAt, 100, 10000), WaitBeforeMs = wait });
                 }
             }
+            else if (wParam == (IntPtr)0x020A && Native.PointInWindow(renderWindow, info.pt))
+            {
+                var point = Native.ToGame(renderWindow, info.pt);
+                var delta = unchecked((short)(info.mouseData >> 16));
+                if (delta != 0)
+                {
+                    var now = clock.ElapsedMilliseconds;
+                    var wait = (int)Math.Clamp(now - lastAction, 0, 600000);
+                    lastAction = now;
+                    onStep(new ActionStep { Type = "Wheel", X1 = point.X, Y1 = point.Y, WheelDelta = delta, WaitBeforeMs = wait });
+                }
+            }
         }
         return Native.CallNextHookEx(hook, code, wParam, lParam);
     }
@@ -836,7 +867,8 @@ public sealed class MouseRecorder : IDisposable
 
 static class GameClient
 {
-    const int WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, MK_LBUTTON = 0x0001;
+    const int WM_ACTIVATE = 0x0006, WM_SETFOCUS = 0x0007, WA_ACTIVE = 1;
+    const int WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_MOUSEWHEEL = 0x020A, MK_LBUTTON = 0x0001;
     static Native.RECT parkedOriginal;
     static bool parked, wasMinimized;
     public static string LastCaptureMode { get; private set; } = "窗口后台截图";
@@ -852,30 +884,79 @@ static class GameClient
         return Native.FindWindowByProcess("GF2_Exilium");
     }
 
-    public static Task TapAsync(IntPtr window, int x, int y, CancellationToken token)
+    public static async Task TapAsync(IntPtr window, int x, int y, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var p = ScalePoint(window, x, y); var lp = MakeLParam(p.X, p.Y);
-        Native.PostMessage(window, WM_MOUSEMOVE, IntPtr.Zero, lp);
-        Native.PostMessage(window, WM_LBUTTONDOWN, (IntPtr)MK_LBUTTON, lp);
-        Native.PostMessage(window, WM_LBUTTONUP, IntPtr.Zero, lp);
-        return Task.CompletedTask;
+        var target = Native.FindInputWindow(window);
+        var p = TargetClientPoint(window, target, x, y);
+        var lp = MakeLParam(p.X, p.Y);
+        PrepareBackgroundInput(window, target);
+        SendMouse(target, WM_MOUSEMOVE, IntPtr.Zero, lp);
+        SendMouse(target, WM_LBUTTONDOWN, (IntPtr)MK_LBUTTON, lp);
+        await Task.Delay(65, token);
+        SendMouse(target, WM_LBUTTONUP, IntPtr.Zero, lp);
+        await Task.Delay(25, token);
     }
 
     public static async Task SwipeAsync(IntPtr window, int x1, int y1, int x2, int y2, int durationMs, CancellationToken token)
     {
-        var a = ScalePoint(window, x1, y1); var b = ScalePoint(window, x2, y2);
-        Native.PostMessage(window, WM_MOUSEMOVE, IntPtr.Zero, MakeLParam(a.X, a.Y));
-        Native.PostMessage(window, WM_LBUTTONDOWN, (IntPtr)MK_LBUTTON, MakeLParam(a.X, a.Y));
+        token.ThrowIfCancellationRequested();
+        var target = Native.FindInputWindow(window);
+        var a = TargetClientPoint(window, target, x1, y1); var b = TargetClientPoint(window, target, x2, y2);
+        PrepareBackgroundInput(window, target);
+        SendMouse(target, WM_MOUSEMOVE, IntPtr.Zero, MakeLParam(a.X, a.Y));
+        SendMouse(target, WM_LBUTTONDOWN, (IntPtr)MK_LBUTTON, MakeLParam(a.X, a.Y));
+        await Task.Delay(40, token);
         var frames = Math.Clamp(durationMs / 16, 4, 120);
         for (var i = 1; i <= frames; i++)
         {
             token.ThrowIfCancellationRequested();
             var x = a.X + (b.X - a.X) * i / frames; var y = a.Y + (b.Y - a.Y) * i / frames;
-            Native.PostMessage(window, WM_MOUSEMOVE, (IntPtr)MK_LBUTTON, MakeLParam(x, y));
+            SendMouse(target, WM_MOUSEMOVE, (IntPtr)MK_LBUTTON, MakeLParam(x, y));
             await Task.Delay(Math.Max(1, durationMs / frames), token);
         }
-        Native.PostMessage(window, WM_LBUTTONUP, IntPtr.Zero, MakeLParam(b.X, b.Y));
+        SendMouse(target, WM_LBUTTONUP, IntPtr.Zero, MakeLParam(b.X, b.Y));
+        await Task.Delay(25, token);
+    }
+
+    public static async Task WheelAsync(IntPtr window, int x, int y, int delta, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var target = Native.FindInputWindow(window);
+        var client = TargetClientPoint(window, target, x, y);
+        var screen = RootScreenPoint(window, x, y);
+        PrepareBackgroundInput(window, target);
+        SendMouse(target, WM_MOUSEMOVE, IntPtr.Zero, MakeLParam(client.X, client.Y));
+        SendMouse(target, WM_MOUSEWHEEL, (IntPtr)(delta << 16), MakeLParam(screen.X, screen.Y));
+        await Task.Delay(35, token);
+    }
+
+    static void PrepareBackgroundInput(IntPtr root, IntPtr target)
+    {
+        Native.PostMessage(root, WM_ACTIVATE, (IntPtr)WA_ACTIVE, IntPtr.Zero);
+        Native.PostMessage(target, WM_SETFOCUS, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    static void SendMouse(IntPtr target, int message, IntPtr wParam, IntPtr lParam)
+    {
+        if (Native.SendMessageTimeout(target, message, wParam, lParam, 0x0002, 200, out _) == IntPtr.Zero)
+            Native.PostMessage(target, message, wParam, lParam);
+    }
+
+    static Point TargetClientPoint(IntPtr root, IntPtr target, int x, int y)
+    {
+        var screen = RootScreenPoint(root, x, y);
+        var p = new Native.POINT { X = screen.X, Y = screen.Y };
+        Native.ScreenToClient(target, ref p);
+        return new Point(p.X, p.Y);
+    }
+
+    static Point RootScreenPoint(IntPtr root, int x, int y)
+    {
+        var client = ScalePoint(root, x, y);
+        var p = new Native.POINT { X = client.X, Y = client.Y };
+        Native.ClientToScreen(root, ref p);
+        return new Point(p.X, p.Y);
     }
 
     public static Task<Bitmap> CaptureAsync(IntPtr window, CancellationToken token)
@@ -1076,13 +1157,14 @@ public sealed class CoordinateDialog : Form
     public CoordinateDialog(ActionStep step)
     {
         var isSwipe = step.Type == "Swipe";
-        Text = isSwipe ? "修改滑动坐标" : "修改点击坐标";
+        var isWheel = step.Type == "Wheel";
+        Text = isSwipe ? "修改滑动坐标" : isWheel ? "修改滚轮位置" : "修改点击坐标";
         ClientSize = new Size(430, isSwipe ? 250 : 175);
         StartPosition = FormStartPosition.CenterParent; FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false; MinimizeBox = false; Font = new Font("Microsoft YaHei UI", 10F); AutoScaleMode = AutoScaleMode.Dpi;
         x1.Value = Math.Clamp(step.X1, 0, 1919); y1.Value = Math.Clamp(step.Y1, 0, 1079);
         x2.Value = Math.Clamp(step.X2, 0, 1919); y2.Value = Math.Clamp(step.Y2, 0, 1079);
-        AddCoordinateRow(isSwipe ? "滑动起点" : "点击位置", x1, y1, 25);
+        AddCoordinateRow(isSwipe ? "滑动起点" : isWheel ? "滚轮位置" : "点击位置", x1, y1, 25);
         if (isSwipe) AddCoordinateRow("滑动终点", x2, y2, 92);
         var note = new Label { Left = 22, Top = isSwipe ? 150 : 83, Width = 380, Text = "坐标范围：X 0–1919，Y 0–1079" };
         var buttonTop = isSwipe ? 195 : 120;
@@ -1221,12 +1303,14 @@ static class Native
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
-    [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr hwnd, ref POINT point);
+    [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr hwnd, ref POINT point);
+    [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref POINT point);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
 
@@ -1245,6 +1329,21 @@ static class Native
             return true;
         }, IntPtr.Zero);
         return found;
+    }
+    public static IntPtr FindInputWindow(IntPtr root)
+    {
+        if (!GetClientRect(root, out var rootRect)) return root;
+        var rootArea = Math.Max(1L, (long)rootRect.Right * rootRect.Bottom);
+        var best = IntPtr.Zero;
+        long bestArea = 0;
+        EnumChildWindows(root, (child, _) =>
+        {
+            if (!IsWindowVisible(child) || !GetClientRect(child, out var rect)) return true;
+            var area = Math.Max(0L, (long)rect.Right * rect.Bottom);
+            if (area > bestArea) { best = child; bestArea = area; }
+            return true;
+        }, IntPtr.Zero);
+        return best != IntPtr.Zero && bestArea >= rootArea / 4 ? best : root;
     }
     public static bool PointInWindow(IntPtr h, POINT p) => GetWindowRect(h, out var r) && p.X >= r.Left && p.X < r.Right && p.Y >= r.Top && p.Y < r.Bottom;
     public static POINT ToGame(IntPtr h, POINT p)
